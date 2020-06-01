@@ -1,5 +1,66 @@
+use gl::types::*;
+use glutin::{Api, ContextBuilder, GlProfile, GlRequest};
+use winit::{
+    dpi::PhysicalSize,
+    event::{ElementState, Event, VirtualKeyCode, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    window::{Fullscreen, WindowBuilder},
+};
+
 fn main() {
-    println!("Hello, world!");
+    let event_loop = EventLoop::new();
+    let monitor = event_loop.primary_monitor();
+    let PhysicalSize { width, height } = monitor.size();
+    let window_builder = WindowBuilder::new()
+        .with_visible(false)
+        .with_title("chip8")
+        .with_fullscreen(Some(Fullscreen::Borderless(monitor)));
+    let context = ContextBuilder::new()
+        .with_gl(GlRequest::Specific(Api::OpenGl, (3, 3)))
+        .with_gl_profile(GlProfile::Core)
+        .build_windowed(window_builder, &event_loop)
+        .unwrap();
+    let context = unsafe { context.make_current().unwrap() };
+    gl::load_with(|s| context.get_proc_address(s));
+    unsafe {
+        gl::Viewport(0, 0, width as i32, height as i32);
+        gl::ClearColor(0.0, 0.0, 0.0, 1.0);
+        gl::Clear(gl::COLOR_BUFFER_BIT);
+    }
+    context.window().set_visible(true);
+
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Poll;
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => *control_flow = ControlFlow::Exit,
+            Event::WindowEvent {
+                event: WindowEvent::KeyboardInput { input, .. },
+                ..
+            } => {
+                if input.state == ElementState::Pressed {
+                    match input.virtual_keycode {
+                        Some(VirtualKeyCode::Escape) => *control_flow = ControlFlow::Exit,
+                        _ => {}
+                    }
+                }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Resized(PhysicalSize { width, height }),
+                ..
+            } => unsafe {
+                gl::Viewport(0, 0, width as i32, height as i32);
+            },
+            Event::MainEventsCleared => unsafe {
+                gl::ClearColor(0.0, 0.0, 0.0, 1.0);
+                gl::Clear(gl::COLOR_BUFFER_BIT);
+                context.swap_buffers().unwrap();
+            },
+            _ => (),
+        }
+    });
 }
 
 mod display {
