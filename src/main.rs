@@ -1,338 +1,121 @@
-use gl::types::*;
+use std::time::Instant;
+
+use glium::glutin;
+use glium::{Display, Rect};
+use glutin::event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent};
+use glutin::event_loop::{ControlFlow, EventLoop};
+use glutin::window::{Fullscreen, WindowBuilder};
 use glutin::{Api, ContextBuilder, GlProfile, GlRequest};
-use winit::{
-    dpi::PhysicalSize,
-    event::{ElementState, Event, VirtualKeyCode, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::{Fullscreen, WindowBuilder},
-};
+
+mod audio;
+mod chip8;
+mod cpu;
+mod display;
+mod input;
+mod renderer;
+
+use chip8::Chip8;
+use renderer::Renderer;
+
+const ASPECT_RATIO: f32 = 2.0 / 1.0;
+
+const CYCLE_HZ: u32 = 720;
+const TICK_HZ: u32 = 60;
+
+const CYCLE_TIME: f32 = 1.0 / CYCLE_HZ as f32;
+const TICK_TIME: f32 = 1.0 / TICK_HZ as f32;
+
+// const PROGRAM: &[u8] = include_bytes!("../roms/games/Lunar Lander (Udo Pernisz, 1979).ch8");
+// const PROGRAM: &[u8] = include_bytes!("../roms/games/Tetris [Fran Dachille, 1991].ch8");
+// const PROGRAM: &[u8] = include_bytes!("../roms/glitchGhost.ch8");
+const PROGRAM: &[u8] = include_bytes!("../roms/games/Pong [Paul Vervalin, 1990].ch8");
 
 fn main() {
     let event_loop = EventLoop::new();
     let monitor = event_loop.primary_monitor();
-    let PhysicalSize { width, height } = monitor.size();
     let window_builder = WindowBuilder::new()
         .with_visible(false)
         .with_title("chip8")
         .with_fullscreen(Some(Fullscreen::Borderless(monitor)));
-    let context = ContextBuilder::new()
+    let context_builder = ContextBuilder::new()
         .with_gl(GlRequest::Specific(Api::OpenGl, (3, 3)))
         .with_gl_profile(GlProfile::Core)
-        .build_windowed(window_builder, &event_loop)
-        .unwrap();
-    let context = unsafe { context.make_current().unwrap() };
-    gl::load_with(|s| context.get_proc_address(s));
-    unsafe {
-        gl::Viewport(0, 0, width as i32, height as i32);
-        gl::ClearColor(0.0, 0.0, 0.0, 1.0);
-        gl::Clear(gl::COLOR_BUFFER_BIT);
-    }
-    context.window().set_visible(true);
+        .with_vsync(true);
+    let display = Display::new(window_builder, context_builder, &event_loop).unwrap();
 
+    let mut chip8 = Chip8::new(PROGRAM);
+    let mut renderer = Renderer::new(display);
+
+    let mut prev_t = Instant::now();
+    let mut tick_dt = 0.0;
+    let mut cycle_dt = 0.0;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
         match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => *control_flow = ControlFlow::Exit,
-            Event::WindowEvent {
-                event: WindowEvent::KeyboardInput { input, .. },
-                ..
-            } => {
-                if input.state == ElementState::Pressed {
-                    match input.virtual_keycode {
-                        Some(VirtualKeyCode::Escape) => *control_flow = ControlFlow::Exit,
-                        _ => {}
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
+                WindowEvent::KeyboardInput {
+                    input:
+                        KeyboardInput {
+                            state,
+                            virtual_keycode: Some(key),
+                            ..
+                        },
+                    ..
+                } => match (state, key) {
+                    (ElementState::Pressed, VirtualKeyCode::Escape) => {
+                        *control_flow = ControlFlow::Exit
                     }
+                    (ElementState::Pressed, key) => {
+                        if let Some(k) = keymap(key) {
+                            chip8.key_pressed(k)
+                        }
+                    }
+                    (ElementState::Released, key) => {
+                        if let Some(k) = keymap(key) {
+                            chip8.key_released(k)
+                        }
+                    }
+                },
+                WindowEvent::Resized(window_size) => {
+                    let height = (ASPECT_RATIO.recip() * window_size.width as f32) as u32;
+                    renderer.set_viewport(Rect {
+                        left: 0,
+                        bottom: (window_size.height - height) / 2,
+                        width: window_size.width,
+                        height: height,
+                    });
                 }
+                _ => {}
+            },
+            Event::MainEventsCleared => {
+                let now = Instant::now();
+                let dt = (now - prev_t).as_secs_f32();
+                prev_t = now;
+                tick_dt += dt;
+                cycle_dt += dt;
+
+                while cycle_dt > CYCLE_TIME {
+                    chip8.cycle();
+                    cycle_dt -= CYCLE_TIME;
+                }
+
+                while tick_dt > TICK_TIME {
+                    chip8.tick();
+                    tick_dt -= TICK_TIME;
+                }
+
+                renderer.render(chip8.display());
             }
-            Event::WindowEvent {
-                event: WindowEvent::Resized(PhysicalSize { width, height }),
-                ..
-            } => unsafe {
-                gl::Viewport(0, 0, width as i32, height as i32);
-            },
-            Event::MainEventsCleared => unsafe {
-                gl::ClearColor(0.0, 0.0, 0.0, 1.0);
-                gl::Clear(gl::COLOR_BUFFER_BIT);
-                context.swap_buffers().unwrap();
-            },
-            _ => (),
+            _ => {}
         }
     });
 }
 
-mod display {
-    struct ScreenBuffer {
-        buffer: [u8; 256],
-    }
-}
-
-mod input {}
-
-mod chip8 {
-    struct Chip8 {
-        memory: [u8; 4096],
-        registers: [u8; 16],
-        address_register: u16,
-        instruction_pointer: usize,
-        delay_timer: u8,
-        sound_timer: u8,
-        stack: Vec<u16>,
-    }
-
-    impl Chip8 {
-        pub fn new() -> Self {
-            Self {
-                memory: [0; 4096],
-                registers: [0; 16],
-                address_register: 0,
-                instruction_pointer: 0,
-                delay_timer: 0,
-                sound_timer: 0,
-                stack: vec![],
-            }
-        }
-
-        pub fn run(&mut self) {}
-    }
-
-    // https://en.wikipedia.org/wiki/CHIP-8#Opcode_table
-    enum Instruction {
-        RCA1802 { address: u16 },                    //0NNN
-        ClearScreen,                                 //00E0
-        Return,                                      //00EE
-        GoTo { address: u16 },                       //1NNN
-        Subroutine { address: u16 },                 //2NNN
-        IfEqualConst { register: u8, value: u8 },    //3XNN
-        IfNotEqualConst { register: u8, value: u8 }, //4XNN
-        IfEqualRegister { a: u8, b: u8 },            //5XY0
-        SetConst { register: u8, value: u8 },        //6XNN
-        AddConst { register: u8, value: u8 },        //7XNN
-        SetRegister { dest: u8, src: u8 },           //8XY0
-        Or { a: u8, b: u8 },                         //8XY1
-        And { a: u8, b: u8 },                        //8XY2
-        Xor { a: u8, b: u8 },                        //8XY3
-        Add { a: u8, b: u8 },                        //8XY4
-        Sub { a: u8, b: u8 },                        //8XY5
-        ShiftRight { register: u8 },                 //8XY6
-        NegSub { a: u8, b: u8 },                     //8XY7
-        ShiftLeft { register: u8 },                  //8XYE
-        IfNotEqualRegister { a: u8, b: u8 },         //9XY0
-        SetI { address: u16 },                       //ANNN
-        Jump { address: u16 },                       //BNNN
-        Rand { register: u8, value: u8 },            //CXNN
-        DrawSprite { x: u8, y: u8, height: u8 },     //DXYN
-        IfPressed { register: u8 },                  //EX9E
-        IfNotPressed { register: u8 },               //EXA1
-        GetTimer { register: u8 },                   //FX07
-        AwaitInput { register: u8 },                 //FX0A
-        SetTimer { register: u8 },                   //FX15
-        SetSound { register: u8 },                   //FX18
-        AddToI { register: u8 },                     //FX1E
-        SetIToFontChar { register: u8 },             //FX29
-        BinaryCodedDecimal { register: u8 },         //FX33
-        RegisterDump { register: u8 },               //FX55
-        RegisterLoad { register: u8 },               //FX65
-    }
-
-    impl Instruction {
-        fn from_opcode(opcode: u16) -> Self {
-            let opcode = Opcode::new(opcode);
-            match opcode {
-                Opcode {
-                    control: 0,
-                    a: 0,
-                    constant: 0xE0,
-                    ..
-                } => Self::ClearScreen,
-                Opcode {
-                    control: 0,
-                    a: 0,
-                    constant: 0xEE,
-                    ..
-                } => Self::Return,
-                Opcode { control: 0, .. } => Self::RCA1802 {
-                    address: opcode.address,
-                },
-                Opcode { control: 1, .. } => Self::GoTo {
-                    address: opcode.address,
-                },
-                Opcode { control: 2, .. } => Self::Subroutine {
-                    address: opcode.address,
-                },
-                Opcode { control: 3, .. } => Self::IfEqualConst {
-                    register: opcode.a,
-                    value: opcode.constant,
-                },
-                Opcode { control: 4, .. } => Self::IfNotEqualConst {
-                    register: opcode.a,
-                    value: opcode.constant,
-                },
-                Opcode {
-                    control: 5, c: 0, ..
-                } => Self::IfEqualRegister {
-                    a: opcode.a,
-                    b: opcode.b,
-                },
-                Opcode { control: 6, .. } => Self::SetConst {
-                    register: opcode.a,
-                    value: opcode.constant,
-                },
-                Opcode { control: 7, .. } => Self::AddConst {
-                    register: opcode.a,
-                    value: opcode.constant,
-                },
-                Opcode {
-                    control: 8, c: 0, ..
-                } => Self::SetRegister {
-                    dest: opcode.a,
-                    src: opcode.b,
-                },
-                Opcode {
-                    control: 8, c: 1, ..
-                } => Self::Or {
-                    a: opcode.a,
-                    b: opcode.b,
-                },
-                Opcode {
-                    control: 8, c: 2, ..
-                } => Self::And {
-                    a: opcode.a,
-                    b: opcode.b,
-                },
-                Opcode {
-                    control: 8, c: 3, ..
-                } => Self::Xor {
-                    a: opcode.a,
-                    b: opcode.b,
-                },
-                Opcode {
-                    control: 8, c: 4, ..
-                } => Self::Add {
-                    a: opcode.a,
-                    b: opcode.b,
-                },
-                Opcode {
-                    control: 8, c: 5, ..
-                } => Self::Sub {
-                    a: opcode.a,
-                    b: opcode.b,
-                },
-                Opcode {
-                    control: 8, c: 6, ..
-                } => Self::ShiftRight { register: opcode.a },
-                Opcode {
-                    control: 8, c: 7, ..
-                } => Self::NegSub {
-                    a: opcode.a,
-                    b: opcode.b,
-                },
-                Opcode {
-                    control: 8, c: 0xE, ..
-                } => Self::ShiftLeft { register: opcode.a },
-                Opcode {
-                    control: 9, c: 0, ..
-                } => Self::IfNotEqualRegister {
-                    a: opcode.a,
-                    b: opcode.b,
-                },
-                Opcode { control: 0xA, .. } => Self::SetI {
-                    address: opcode.address,
-                },
-                Opcode { control: 0xB, .. } => Self::Jump {
-                    address: opcode.address,
-                },
-                Opcode { control: 0xC, .. } => Self::Rand {
-                    register: opcode.a,
-                    value: opcode.constant,
-                },
-                Opcode { control: 0xD, .. } => Self::DrawSprite {
-                    x: opcode.a,
-                    y: opcode.b,
-                    height: opcode.c,
-                },
-                Opcode {
-                    control: 0xE,
-                    constant: 0x9E,
-                    ..
-                } => Self::IfPressed { register: opcode.a },
-                Opcode {
-                    control: 0xE,
-                    constant: 0xA1,
-                    ..
-                } => Self::IfNotPressed { register: opcode.a },
-                Opcode {
-                    control: 0xF,
-                    constant: 0x07,
-                    ..
-                } => Self::GetTimer { register: opcode.a },
-                Opcode {
-                    control: 0xF,
-                    constant: 0x0A,
-                    ..
-                } => Self::AwaitInput { register: opcode.a },
-                Opcode {
-                    control: 0xF,
-                    constant: 0x15,
-                    ..
-                } => Self::SetTimer { register: opcode.a },
-                Opcode {
-                    control: 0xF,
-                    constant: 0x18,
-                    ..
-                } => Self::SetSound { register: opcode.a },
-                Opcode {
-                    control: 0xF,
-                    constant: 0x1E,
-                    ..
-                } => Self::AddToI { register: opcode.a },
-                Opcode {
-                    control: 0xF,
-                    constant: 0x29,
-                    ..
-                } => Self::SetIToFontChar { register: opcode.a },
-                Opcode {
-                    control: 0xF,
-                    constant: 0x33,
-                    ..
-                } => Self::BinaryCodedDecimal { register: opcode.a },
-                Opcode {
-                    control: 0xF,
-                    constant: 0x55,
-                    ..
-                } => Self::RegisterDump { register: opcode.a },
-                Opcode {
-                    control: 0xF,
-                    constant: 0x65,
-                    ..
-                } => Self::RegisterLoad { register: opcode.a },
-                _ => panic!("invalid opcode"),
-            }
-        }
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct Opcode {
-        control: u8,
-        address: u16,
-        constant: u8,
-        a: u8,
-        b: u8,
-        c: u8,
-    }
-
-    impl Opcode {
-        fn new(opcode: u16) -> Self {
-            Self {
-                control: ((opcode & 0xF000) >> 12) as u8,
-                address: opcode & 0x0FFF,
-                constant: (opcode & 0x00FF) as u8,
-                a: ((opcode & 0x0F00) >> 8) as u8,
-                b: ((opcode & 0x00F0) >> 4) as u8,
-                c: (opcode & 0x000F) as u8,
-            }
-        }
-    }
+fn keymap(key: VirtualKeyCode) -> Option<u8> {
+    use VirtualKeyCode::*;
+    [X, Key1, Key2, Key3, Q, W, E, A, S, D, Z, C, Key4, R, F, V]
+        .iter()
+        .position(|&k| k == key)
+        .map(|i| i as u8)
 }
